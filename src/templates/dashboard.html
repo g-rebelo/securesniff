@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Relatório SecureSniff</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f0f2f5; font-family: sans-serif; }
+        .header { background: #2c3e50; color: white; padding: 40px; text-align: center; }
+        .card { margin-bottom: 20px; border: none; shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🛡️ SecureSniff Dashboard</h1>
+        <p>Gerado em: {{ generation_time }}</p>
+    </div>
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-md-4">
+                <div class="card p-3 text-center">
+                    <h3>Total de Ataques</h3>
+                    <h1 class="text-danger">{{ total_attacks }}</h1>
+                </div>
+            </div>
+            <div class="col-md-8">
+                <div class="card p-3">
+                    {{ graph_html | safe }}
+                </div>
+            </div>
+        </div>
+        <div class="card p-4 mt-4">
+            <h4>Últimos Alertas</h4>
+            <table class="table table-striped">
+                <thead><tr><th>Data</th><th>Tipo</th><th>Mensagem</th></tr></thead>
+                <tbody>
+                    {% for log in recent_logs %}
+                    <tr>
+                        <td>{{ log.timestamp }}</td>
+                        <td><span class="badge bg-danger">{{ log.type }}</span></td>
+                        <td>{{ log.message }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>

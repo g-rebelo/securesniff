@@ -1,0 +1,66 @@
+import pandas as pd
+import plotly.express as px
+from jinja2 import Environment, FileSystemLoader
+from datetime import datetime
+import os
+import re
+
+class ReportGenerator:
+    def __init__(self):
+        # Caminhos para os ficheiros
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+        self.log_file = os.path.join(base_dir, 'logs', 'attacks.log')
+        self.template_dir = os.path.join(base_dir, 'src', 'templates')
+        self.output_file = os.path.join(base_dir, 'relatorio_final.html')
+
+    def parse_logs(self):
+        data = []
+        if not os.path.exists(self.log_file): return pd.DataFrame()
+
+        with open(self.log_file, 'r') as f:
+            for line in f:
+                match = re.search(r'\[(.*?)\] (.*? DETETADO!)(.*)', line)
+                if match:
+                    try:
+                        data.append({
+                            'timestamp': match.group(1),
+                            'type': match.group(2).replace(' DETETADO!', '').strip(),
+                            'message': match.group(3).strip()
+                        })
+                    except: continue
+        return pd.DataFrame(data)
+
+    def generate(self):
+        print("[*] A analisar logs...")
+        df = self.parse_logs()
+        if df.empty:
+            print("[!] Sem logs para analisar.")
+            return
+
+        # Gráfico
+        try:
+            counts = df['type'].value_counts().reset_index()
+            counts.columns = ['Tipo', 'Qtd']
+            fig = px.pie(counts, values='Qtd', names='Tipo', title='Ameaças', hole=0.4)
+            graph_html = fig.to_html(full_html=False)
+        except Exception as e:
+            print(f"Erro no gráfico: {e}")
+            graph_html = "<p>Sem dados gráficos</p>"
+
+        # HTML
+        env = Environment(loader=FileSystemLoader(self.template_dir))
+        template = env.get_template('dashboard.html')
+
+        recent = df.tail(20).to_dict('records')
+        recent.reverse()
+
+        html = template.render(
+            generation_time=datetime.now().strftime("%d/%m/%Y %H:%M"),
+            total_attacks=len(df),
+            graph_html=graph_html,
+            recent_logs=recent
+        )
+
+        with open(self.output_file, 'w') as f: f.write(html)
+        print(f"[SUCESSO] Relatório gerado: {self.output_file}")
+        
