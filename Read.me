@@ -1,0 +1,323 @@
+# 🛡️ SecureSniff — Network Intrusion Detection System (NIDS)
+
+> **Projeto académico de cibersegurança** · Desenvolvido em Python · Parrot OS / Linux  
+> Sistema de Deteção de Intrusões de Rede construído de raiz, sem ferramentas comerciais.
+
+---
+
+## 📋 Índice
+
+- [Visão Geral](#visão-geral)
+- [Arquitetura do Sistema](#arquitetura-do-sistema)
+- [Módulos Principais](#módulos-principais)
+- [Tecnologias Utilizadas](#tecnologias-utilizadas)
+- [Instalação](#instalação)
+- [Como Usar](#como-usar)
+- [Demonstração](#demonstração)
+- [Estrutura do Projeto](#estrutura-do-projeto)
+- [Contexto Académico](#contexto-académico)
+
+---
+
+## Visão Geral
+
+O **SecureSniff** é um **Sistema de Deteção de Intrusões na Rede (NIDS)** passivo, desenvolvido integralmente em Python. Opera em modo de escuta (*read-only*), analisando pacotes de rede em tempo real sem interferir no tráfego.
+
+O sistema implementa um pipeline completo de segurança ofensiva/defensiva:
+
+```
+Captura de Rede → Análise Heurística → Inspeção Profunda → Persistência → Relatório Visual
+```
+
+### O que o SecureSniff deteta
+
+| Ameaça | Técnica | Camada OSI |
+|---|---|---|
+| **Port Scan** (ex: Nmap) | Heurística comportamental | Camada 4 (TCP) |
+| **SYN Flood** (DoS/DDoS) | Análise de taxa de pacotes | Camada 4 (TCP) |
+| **ARP Spoofing** (MITM) | Validação de tabela MAC | Camada 2 (ARP) |
+| **Credenciais em texto claro** | Deep Packet Inspection | Camada 7 (HTTP) |
+
+---
+
+## Arquitetura do Sistema
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                      CLI (Click)                         │
+│              capture command │ report command            │
+└──────────────────┬───────────────────┬──────────────────┘
+                   │                   │
+        ┌──────────▼──────────┐  ┌────▼─────────────────┐
+        │   PacketCapture      │  │   ReportGenerator     │
+        │   (AsyncSniffer)     │  │   (Pandas + Plotly)   │
+        └──────────┬──────────┘  └────▲─────────────────┘
+                   │                   │
+        ┌──────────▼──────────┐  ┌────┴─────────────────┐
+        │  Detector Engine     │  │   Logger (attacks.log)│
+        │  ├─ PortScanDetector │──►   [timestamp] event  │
+        │  ├─ SynFloodDetector │  └──────────────────────┘
+        │  ├─ ArpSpoofDetector │
+        │  └─ HTTPParser (DPI) │
+        └─────────────────────┘
+```
+
+O sistema foi desenhado com **separação de responsabilidades**: o motor de captura é totalmente independente do motor de análise e do motor de relatórios. Esta arquitetura permite escalar cada componente individualmente.
+
+---
+
+## Módulos Principais
+
+### 1. 🎧 Motor de Captura — `src/capture/live_capture.py`
+
+Abre um **raw socket** na interface de rede (ex: `enp2s0`) com privilégios de administrador, intercetando pacotes antes do processamento pelo SO.
+
+**Detalhe de engenharia crítico:** Usa `AsyncSniffer` com `store=False`.
+- `AsyncSniffer` → corre numa thread paralela, sem bloquear o processo principal.
+- `store=False` → os pacotes não são acumulados em RAM; o sistema pode correr durante horas sem degradação de desempenho.
+
+```python
+sniffer = AsyncSniffer(iface=self.interface, prn=self.process_packet, store=False)
+```
+
+---
+
+### 2. 🧠 Motor Heurístico — `src/analysis/detectors/`
+
+Em vez de uma base de dados de assinaturas (como Snort/Suricata), o SecureSniff usa **análise comportamental**. Não pergunta *"este pacote é mau?"*, mas sim *"este comportamento é suspeito?"*.
+
+#### Port Scan Detector
+- Regista os pares `{IP → conjunto de portas tentadas}` por janela de tempo
+- Se um único IP tentar mais de **15 portas distintas em 10 segundos** → alerta de reconhecimento
+- Distingue tráfego legítimo (poucas portas repetidas) de scanning (muitas portas únicas)
+
+```python
+if len(attacker['ports']) > self.PORT_LIMIT:  # PORT_LIMIT = 15
+    self.alert(src, len(attacker['ports']))
+```
+
+#### SYN Flood Detector
+- Mede a **taxa de pacotes TCP SYN** por segundo por origem
+- Um TCP Handshake legítimo: SYN → SYN-ACK → ACK
+- Um SYN Flood: SYN × 10.000 (nunca há ACK de resposta, esgotando as filas do servidor)
+- Limiar: **>100 pacotes SYN/segundo** da mesma origem → alerta DoS
+
+#### ARP Spoofing Detector
+- Mantém uma tabela `{IP: MAC Address}` aprendida passivamente
+- Quando um ARP Reply altera o MAC de um IP já conhecido → ataque **Man-in-the-Middle** detetado
+- Este ataque é o precursor do sniffing numa rede local (LAN)
+
+---
+
+### 3. 🕵️ Deep Packet Inspection — `src/parser/http_parser.py`
+
+Módulo de **Inspeção Profunda de Pacotes (DPI)** focado na Camada 7 (Aplicação).
+
+- Extrai o payload da camada `Raw` do Scapy
+- Descodifica bytes para UTF-8
+- Pesquisa por palavras-chave: `user=`, `pass=`, `password=`, `login=`, `username=`
+- Se encontradas → alerta crítico vermelho com o conteúdo extraído
+
+> ⚠️ **Propósito educativo:** Demonstra em ambiente controlado por que razão HTTP (sem TLS) é inseguro. Qualquer elemento na mesma rede pode capturar credenciais em texto claro. A solução é **HTTPS obrigatório**.
+
+---
+
+### 4. 📝 Sistema de Persistência — `src/utils/logger.py`
+
+Módulo de logging centralizado que cria uma **trilha de auditoria forense**.
+
+Formato dos registos:
+```
+[2026-01-13 17:29:15] PORT SCAN DETETADO! Origem: 192.168.1.90 | Portas: 16
+[2026-01-13 17:29:16] SYN FLOOD DETETADO! Origem: 192.168.1.90 | Taxa: 101 pacotes/s
+```
+
+Estrutura pensada para posterior parsing com **Regex** no motor de relatórios.
+
+---
+
+### 5. 📊 Motor Analítico — `src/report/generator.py`
+
+Pipeline **ETL** (Extract, Transform, Load) completo:
+
+1. **Extract** — Lê o ficheiro `attacks.log` linha a linha
+2. **Transform** — Usa **Regex** para parsear cada linha e estruturar num `DataFrame` (Pandas)
+3. **Load** — Gera gráficos interativos (Plotly) e injeta num template HTML (Jinja2)
+
+```python
+match = re.search(r'\[(.*?)\] (.*? DETETADO!)(.*)', line)
+df = pd.DataFrame(data)
+fig = px.pie(counts, values='Qtd', names='Tipo', hole=0.4)
+```
+
+O relatório final (`relatorio_final.html`) é um dashboard web standalone com:
+- Contador total de ataques
+- Gráfico circular interativo (donut chart) por tipo de ameaça
+- Tabela dos últimos 20 alertas com badges coloridos
+
+---
+
+### 6. 🕹️ Interface CLI — `cli/commands.py`
+
+Construída com **Click**, separa claramente os dois modos de operação:
+
+```bash
+# Modo defesa (captura em tempo real)
+sudo python cli/commands.py capture --interface enp2s0
+
+# Modo análise (relatório histórico)
+python cli/commands.py report
+```
+
+Este design respeita o **Princípio da Responsabilidade Única (SRP)**: o código de captura de rede não tem conhecimento do código de visualização.
+
+---
+
+## Tecnologias Utilizadas
+
+| Biblioteca | Versão | Propósito |
+|---|---|---|
+| `scapy` | 2.5+ | Captura e dissecação de pacotes (Camadas 2-7) |
+| `click` | 8.x | Interface de linha de comandos estruturada |
+| `rich` | 13.x | Output terminal com formatação e cor |
+| `pandas` | 2.x | Análise e transformação de dados de logs |
+| `plotly` | 5.x | Visualização de dados interativa |
+| `jinja2` | 3.x | Templating HTML para geração de relatórios |
+
+**Sistema Operativo recomendado:** Parrot OS / Kali Linux / Ubuntu  
+**Python:** 3.10+  
+**Requisito:** Privilégios de root (para raw sockets)
+
+---
+
+## Instalação
+
+```bash
+# 1. Clonar o repositório
+git clone https://github.com/[teu-username]/SecureSniff.git
+cd SecureSniff
+
+# 2. Criar ambiente virtual
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Instalar dependências
+pip install scapy click rich pandas plotly jinja2
+
+# 4. Verificar interfaces de rede disponíveis
+ip a
+```
+
+---
+
+## Como Usar
+
+### Captura em Tempo Real
+
+```bash
+# Requer sudo (raw socket)
+sudo ./venv/bin/python cli/commands.py capture --interface enp2s0
+
+# Com limite de pacotes (para testes)
+sudo ./venv/bin/python cli/commands.py capture --interface enp2s0 --count 1000
+```
+
+### Gerar Relatório HTML
+
+```bash
+./venv/bin/python cli/commands.py report
+# Abre relatorio_final.html no browser
+```
+
+### Simular Ataques (ambiente de laboratório)
+
+```bash
+# Port Scan (requer Nmap)
+nmap -sS -p 1-1000 [IP_alvo]
+
+# SYN Flood (requer hping3)
+sudo hping3 -S --flood -p 80 [IP_alvo]
+
+# Credenciais HTTP (requer curl)
+curl -X POST http://[IP_alvo]/login -d "username=admin&password=1234"
+```
+
+---
+
+## Demonstração
+
+### Output da Captura em Tempo Real
+
+```
+[*] SecureSniff a correr na interface: enp2s0
+
+ 🚨 PORT SCAN DETETADO! Origem: 192.168.1.90 | Portas: 16 
+
+ 🌊 SYN FLOOD DETETADO! Origem: 192.168.1.90 | Taxa: 101 pacotes/s 
+
+ 🌐 DADOS SUSPEITOS ENCONTRADOS! 
+ 🔥 CONTEÚDO: POST /login HTTP/1.1 ... username=admin&password=secret123
+```
+
+### Relatório HTML Gerado
+
+O ficheiro `relatorio_final.html` contém um dashboard Bootstrap com:
+- Total de ataques detetados
+- Gráfico donut interativo (Plotly) com distribuição por tipo
+- Tabela cronológica dos últimos alertas
+
+---
+
+## Estrutura do Projeto
+
+```
+SecureSniff/
+├── cli/
+│   └── commands.py          # Ponto de entrada CLI (Click)
+├── src/
+│   ├── capture/
+│   │   └── live_capture.py  # Motor de captura (AsyncSniffer)
+│   ├── analysis/
+│   │   └── detectors/
+│   │       ├── port_scan.py # Detetor de reconhecimento
+│   │       ├── syn_flood.py # Detetor de DoS
+│   │       └── arp_spoof.py # Detetor de MITM
+│   ├── parser/
+│   │   └── http_parser.py   # DPI — Camada 7
+│   ├── report/
+│   │   └── generator.py     # ETL + Dashboard HTML
+│   ├── templates/
+│   │   └── dashboard.html   # Template Jinja2
+│   └── utils/
+│       └── logger.py        # Sistema de logging forense
+├── logs/
+│   └── attacks.log          # Trilha de auditoria
+├── relatorio_final.html     # Dashboard gerado (output)
+└── README.md
+```
+
+---
+
+## Contexto Académico
+
+Este projeto foi desenvolvido como parte do portfólio técnico para candidatura a **Mestrado em Cibersegurança**.
+
+Demonstra competências práticas em:
+
+- **Segurança de Redes** — análise de tráfego nas Camadas 2, 3, 4 e 7 do modelo OSI
+- **Desenvolvimento de Software** — arquitetura modular, separação de responsabilidades, CLI
+- **Data Science aplicada a Segurança** — pipeline ETL, Pandas, Plotly, geração de relatórios
+- **Pensamento Ofensivo/Defensivo** — compreensão dos vetores de ataque para construir as defesas
+- **Linux & Sistemas** — raw sockets, privilégios, interfaces de rede, ambientes virtuais Python
+
+> *"Para construir um bom sistema de defesa, é preciso pensar como um atacante."*
+
+---
+
+## ⚠️ Aviso Legal / Disclaimer
+
+Este projeto foi desenvolvido **exclusivamente para fins educativos e de investigação** em ambiente controlado (rede própria / laboratório). A utilização de ferramentas de captura de rede em redes de terceiros sem autorização explícita é **ilegal** e contrária à ética profissional em cibersegurança.
+
+---
+
+*Desenvolvido com 🛡️ e Python · [Parrot OS](https://www.parrotsec.org/)*
